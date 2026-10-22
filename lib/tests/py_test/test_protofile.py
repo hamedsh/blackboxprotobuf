@@ -47,6 +47,15 @@ if six.PY3:
     to_suppress = (HealthCheck.function_scoped_fixture,)
 
 
+def _get_protoc_cmd():
+    if os.path.exists("/usr/bin/protoc"):
+        return "/usr/bin/protoc"
+    elif shutil.which("protoc"):
+        return shutil.which("protoc")
+    else:
+        return "%s -m grpc_tools.protoc" % sys.executable
+
+
 @given(
     typedef=strategies.message_typedef_gen(named_fields=False),
     name=st.from_regex(protofile.NAME_REGEX),
@@ -72,7 +81,8 @@ def test_proto_export(tmp_path, typedef, name):
         os.mkdir(py_out)
         outfile.flush()
         subprocess.check_call(
-            "/usr/bin/protoc --python_out ./py_out %s" % os.path.basename(outfile.name),
+            "%s -I. --python_out ./py_out %s"
+            % (_get_protoc_cmd(), os.path.basename(outfile.name)),
             shell=True,
             cwd=str(tmp_path),
         )
@@ -217,7 +227,7 @@ def test_proto_decode(tmp_path, x, name):
         os.mkdir(py_out)
         outfile.flush()
         subprocess.check_call(
-            "/usr/bin/protoc --python_out ./py_out %s" % basename,
+            "%s -I. --python_out ./py_out %s" % (_get_protoc_cmd(), basename),
             shell=True,
             cwd=str(tmp_path),
         )
@@ -238,17 +248,29 @@ def test_proto_decode(tmp_path, x, name):
         my_message = message_class()
         my_message.ParseFromString(encoded_message)
 
-        decoded_message = google.protobuf.json_format.MessageToDict(
-            my_message, including_default_value_fields=True
-        )
+        try:
+            decoded_message = google.protobuf.json_format.MessageToDict(
+                my_message, including_default_value_fields=True
+            )
+        except TypeError:
+            decoded_message = google.protobuf.json_format.MessageToDict(
+                my_message, always_print_fields_with_no_presence=True
+            )
 
         note(message)
         note(decoded_message)
-        note(
-            google.protobuf.json_format.MessageToJson(
-                my_message, including_default_value_fields=True
+        try:
+            note(
+                google.protobuf.json_format.MessageToJson(
+                    my_message, including_default_value_fields=True
+                )
             )
-        )
+        except TypeError:
+            note(
+                google.protobuf.json_format.MessageToJson(
+                    my_message, always_print_fields_with_no_presence=True
+                )
+            )
 
         def _check_field_match(orig_value, new_value):
             note(type(new_value))
@@ -302,3 +324,61 @@ def test_proto_decode(tmp_path, x, name):
 
         # Check all the fields match each other
         _check_message_match(message, decoded_message)
+
+
+def test_decode_messages_to_proto(tmp_path):
+    # Construct two messages with complementary optional fields
+    typedef1 = {
+        "1": {"type": "int", "name": "user_id"},
+        "2": {"type": "string", "name": "username"},
+    }
+    msg1 = {"user_id": 1001, "username": "alice"}
+    buf1 = blackboxprotobuf.encode_message(msg1, typedef1)
+
+    typedef2 = {
+        "2": {"type": "string", "name": "username"},
+        "3": {"type": "bytes", "name": "payload"},
+    }
+    msg2 = {"username": "bob", "payload": b"secret"}
+    buf2 = blackboxprotobuf.encode_message(msg2, typedef2)
+
+    # Decode both messages together to generate a proto file
+    decoded_msgs, proto_str, typedef_map = blackboxprotobuf.decode_to_proto(
+        [buf1, buf2], message_name="UserInfo"
+    )
+
+    assert len(decoded_msgs) == 2
+    assert "UserInfo" in typedef_map
+    combined_typedef = typedef_map["UserInfo"]
+
+    # Verify all 3 fields are in the combined typedef
+    assert "1" in combined_typedef
+    assert "2" in combined_typedef
+    assert "3" in combined_typedef
+
+    # Verify proto string structure
+    assert proto_str is not None
+    assert 'syntax = "proto3";' in proto_str
+    assert "message UserInfo {" in proto_str
+
+    # Test writing directly to an output file with package name
+    outfile = tmp_path / "user_info.proto"
+    decoded_msgs_2, proto_str_none, typedef_map_2 = blackboxprotobuf.decode_to_proto(
+        [buf1, buf2],
+        message_name="UserInfo",
+        output_filename=str(outfile),
+        package="test.user",
+    )
+
+    assert proto_str_none is None
+    assert outfile.exists()
+
+    content = outfile.read_text()
+    assert "package test.user;" in content
+    assert "message UserInfo {" in content
+
+    # Test re-importing generated proto file
+    imported_typedef_map = blackboxprotobuf.import_protofile(
+        str(outfile), save_to_known=False
+    )
+    assert "test.user.UserInfo" in imported_typedef_map

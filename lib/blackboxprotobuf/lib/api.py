@@ -256,6 +256,63 @@ def protobuf_from_json(json_str, message_type, config=None):
         return payloads
 
 
+def decode_to_proto(
+    bufs,
+    message_name="Message",
+    message_type=None,
+    output_filename=None,
+    package=None,
+    config=None,
+):
+    # type: (bytes | list[bytes], str, Optional[str | TypeDefDict], Optional[str], Optional[str], Optional[Config]) -> tuple[list[Message], str | None, Dict[str, TypeDefDict]]
+    """Decode a single or multiple binary protobuf messages and generate a '.proto'
+    file/definition for the message type based on all decoded messages.
+
+    Args:
+        bufs: One or more bytes representing encoded protobuf messages
+        message_name: Name of the message type in the generated '.proto' definition.
+            Defaults to "Message".
+        message_type: Optional base type definition or message type name.
+        output_filename: Optional filename to write the '.proto' definition to.
+        package: Optional package name to include in the '.proto' file.
+        config: `blackboxprotobuf.lib.config.Config` object. Defaults to
+            `blackboxprotobuf.lib.config.default` if not provided.
+
+    Returns:
+        A tuple containing:
+        - A list of decoded messages as python dictionaries
+        - A string containing the '.proto' definition (or None if output_filename was specified)
+        - A dictionary mapping message_name to its combined type definition dictionary
+    """
+    if config is None:
+        config = default_config
+
+    buf_list = bufs if isinstance(bufs, list) else [bufs]
+
+    if len(buf_list) == 0:
+        raise DecoderException("No protobuf bytes were provided")
+
+    decoded_messages = []
+    current_typedef = message_type
+
+    for data in buf_list:
+        value, current_typedef = decode_message(data, current_typedef, config)
+        decoded_messages.append(value)
+
+    if not isinstance(current_typedef, dict):
+        raise DecoderException(
+            "Error generating proto: Could not find valid message_type type (dict). Found: %s"
+            % type(current_typedef)
+        )
+
+    typedef_map = {message_name: current_typedef}
+    proto_str = blackboxprotobuf.lib.protofile.export_proto(
+        typedef_map, output_filename=output_filename, package=package
+    )
+
+    return decoded_messages, proto_str, typedef_map
+
+
 def export_protofile(message_types, output_filename):
     # type: (Dict[str, TypeDefDict], str) -> None
     """This function attempts to export a set of message type definitions to a
